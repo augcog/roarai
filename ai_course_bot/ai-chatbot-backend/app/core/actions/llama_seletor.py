@@ -99,6 +99,46 @@ def bge_compute_score(
     return all_scores
 
 
+def step_compute_score(
+    query_embedding,
+    step_embedding,
+    weights_for_different_modes
+):
+    all_scores = {
+        'colbert': [],
+        'sparse': [],
+        'dense': [],
+        'sparse+dense': [],
+        'colbert+sparse+dense': [],
+    }
+
+    if weights_for_different_modes is None:
+        weights_for_different_modes = [1, 1., 1.]
+        weight_sum = 3
+        print("default weights for dense, sparse, colbert are [1.0, 1.0, 1.0]")
+    else:
+        assert len(weights_for_different_modes) == 3
+        weight_sum = sum(weights_for_different_modes)
+
+    # Loop through each document embedding
+        dense_score = query_embedding['dense_vecs'] @ step_embedding['dense_vecs'].T
+        sparse_score = embedding_model.compute_lexical_matching_score(query_embedding['lexical_weights'], step_embedding['lexical_weights'])
+        colbert_score = embedding_model.colbert_score(query_embedding['colbert_vecs'], step_embedding['colbert_vecs'])
+        # Store the scores
+        all_scores['colbert'].append(colbert_score)
+        all_scores['sparse'].append(sparse_score)
+        all_scores['dense'].append(dense_score)
+        all_scores['sparse+dense'].append(
+            (sparse_score * weights_for_different_modes[1] + dense_score * weights_for_different_modes[0]) /
+            (weights_for_different_modes[1] + weights_for_different_modes[0])
+        )
+        all_scores['colbert+sparse+dense'].append(
+            (colbert_score * weights_for_different_modes[2] + sparse_score * weights_for_different_modes[1] +
+             dense_score * weights_for_different_modes[0]) / weight_sum
+        )
+
+    return all_scores
+
 def clean_path(url_path):
     decoded_path = urllib.parse.unquote(url_path)
     cleaned_path = decoded_path.replace('%28', '(').replace('%29', ')').replace('%2B', '+')
@@ -108,6 +148,7 @@ def clean_path(url_path):
     return cleaned_path
 def local_selector(messages:List[Message],stream=True,rag=True):
     insert_document = ""
+    step=False
     user_message = messages[-1].content
     if rag:
         picklefile = "recursive_seperate_none_BGE_embedding_400_106_full.pkl"
@@ -139,6 +180,16 @@ def local_selector(messages:List[Message],stream=True,rag=True):
         top_time = time[:3]
         insert_document = ""
         reference = []
+        #STEP BY STEP CHECK
+        # step_embed = embedding_model.encode("step-by-step", return_dense=True, return_sparse=True,
+        #                                     return_colbert_vecs=True)
+        # cosine_similarities_step = np.array(step_compute_score(query_embed, step_embed, [1, 1, 1]))
+        # step_distances = np.sort(cosine_similarities)[-1:][::-1]
+        #
+        # print("DISTANCES",step_distances)
+        # if step_distances>0.5:
+        #     step=True
+
         n=0
         for i in range(len(top_docs)):
             if top_url[i] and top_time[i]:
@@ -150,10 +201,10 @@ def local_selector(messages:List[Message],stream=True,rag=True):
             if distances[i] > 0.45:
                 n+=1
                 if top_url[i]:
-                    insert_document += f"\"\"\"Reference Number: {n}\nReference: {top_id[i]}\nReference Url: {top_url[i]}\nDocument: {top_docs[i]}\"\"\"\n\n"
+                    insert_document += f"\"\"\"Reference Number: {n}\nReference Info Path: {top_id[i]}\nReference_Url: {top_url[i]}\nDocument: {top_docs[i]}\"\"\"\n\n"
                 else:
                     cleaned_path = clean_path(top_id[i])
-                    insert_document += f"\"\"\"Reference Number: {n}\nReference: {cleaned_path}\nDocument: {top_docs[i]}\"\"\"\n\n"
+                    insert_document += f"\"\"\"Reference Number: {n}\nReference Info Path: {cleaned_path}\nReference_Url: NONE\nDocument: {top_docs[i]}\"\"\"\n\n"
                     # print("CLEANED PATH",cleaned_path)
                 print(top_id[i])
         print(reference)
@@ -161,12 +212,20 @@ def local_selector(messages:List[Message],stream=True,rag=True):
         user_message = f'Answer the instruction\n---\n{user_message}'
         # insert_document+="用中文回答我的指示\n"
         # system_message="用中文回答我的指示"
-        # print(chat_completion(system_message, insert_document))
+        # print(chat_completion(system_message, insert_document))\
+    if step:
+        print("INSERT DOCUMENT", insert_document)
+        insert_document += f'Instruction: {user_message}'
+        # insert_document += "用中文回答我的指示\n"
+        user_message = f"Understand the reference documents and use them to answer the instruction thoroughly and only return to user one well expplained step at a time. List the references numbered, if URL does not exist then print reference info path as is do not print NONE, if url exists then print [reference Name](URL), then summarize the document in 2 sentences. Example Reference: Reference 1: Find information at (Reference Path Info). If Reference_URL is not NONE then print URL [Reference Name](URL). Then print 2 sentence summary of reference document. \n---\n{insert_document}"  # user_message = f"Understand the {n} reference documents and use it to answer the instruction. After answering the instruction, please list references. Print References numbered, if URL exists return [reference summary](URL), then return the reference and summarize the document in 2 sentences.\n---\n{insert_document}"
+
     else:
         print("INSERT DOCUMENT",insert_document)
         insert_document += f'Instruction: {user_message}'
         # insert_document += "用中文回答我的指示\n"
-        user_message = f"Understand the {n} reference documents and use it to answer the instruction. If there is no reference url print Reference of the document used to answer instruction. If reference url exists in the documents add at end [reference summary](URL).\n---\n{insert_document}"
+        user_message = f"Understand the reference documents and use them to answer the instruction thoroughly add suffiecient steps. List the references numbered, if URL does not exist then print reference info path as is do not print NONE, if url exists then print [reference Name](URL), then summarize the document in 2 sentences. Example Reference: Reference 1: Find information at (Reference Path Info). If Reference_URL is not NONE then print URL [Reference Name](URL). Then print 2 sentence summary of reference document. \n---\n{insert_document}"        # user_message = f"Understand the {n} reference documents and use it to answer the instruction. After answering the instruction, please list references. Print References numbered, if URL exists return [reference summary](URL), then return the reference and summarize the document in 2 sentences.\n---\n{insert_document}"
+
+        # user_message = f"Understand the {n} reference documents and use it to answer the instruction. If there is no reference url print Reference of the document used to answer instruction. If reference url exists in the documents add at end [reference summary](URL).\n---\n{insert_document}"
         # system_message="通过阅读以下材料,用中文回答我的指示"
         # print(chat_completion(system_message, insert_document))
     print("USER MESSAGE",user_message)
